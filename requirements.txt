@@ -5,3 +5,4 @@ py7zr==0.21.0
 requests>=2.31.0
 aiofiles>=23.2.1
 psutil>=5.9.6
+python-dotenv>=1.0.1

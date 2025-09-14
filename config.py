@@ -4,6 +4,9 @@
 import os
 from typing import List
 
+# Базовая директория проекта
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Telegram Bot API
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
@@ -17,7 +20,6 @@ AUTHORIZED_USERS: List[int] = [
 ]
 
 # Пути к директориям
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
 TEMP_DIR = os.path.join(BASE_DIR, "temp")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")

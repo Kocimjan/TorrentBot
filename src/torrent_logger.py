@@ -33,27 +33,40 @@ class TorrentLogger:
     """Расширенный логгер для операций с торрентами"""
     
     def __init__(self):
+        # Гарантируем существование директории логов до любых операций
+        os.makedirs(LOGS_DIR, exist_ok=True)
+
+        # Настраиваем обычный логгер как можно раньше (до БД)
+        self.logger = logging.getLogger('torrent_operations')
+        if not self.logger.handlers:
+            self.logger.setLevel(logging.INFO)
+            try:
+                operations_handler = logging.FileHandler(
+                    os.path.join(LOGS_DIR, 'operations.log'),
+                    encoding='utf-8'
+                )
+                operations_handler.setFormatter(
+                    logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+                )
+                self.logger.addHandler(operations_handler)
+            except Exception as e:
+                # Фолбэк на потоковый логгер, если не удалось создать файл
+                stream_handler = logging.StreamHandler()
+                stream_handler.setFormatter(
+                    logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+                )
+                self.logger.addHandler(stream_handler)
+                self.logger.warning(f"Не удалось создать файл логов: {e}")
+
         self.db_path = os.path.join(LOGS_DIR, 'torrent_operations.db')
         self.lock = threading.Lock()
         self._init_database()
-        
-        # Настраиваем обычный логгер
-        self.logger = logging.getLogger('torrent_operations')
-        self.logger.setLevel(logging.INFO)
-        
-        # Файловый обработчик для операций
-        operations_handler = logging.FileHandler(
-            os.path.join(LOGS_DIR, 'operations.log'),
-            encoding='utf-8'
-        )
-        operations_handler.setFormatter(
-            logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-        )
-        self.logger.addHandler(operations_handler)
     
     def _init_database(self):
         """Инициализировать базу данных для логов"""
         try:
+            # Убедимся, что каталог для БД существует
+            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute('''
                     CREATE TABLE IF NOT EXISTS operations (
@@ -79,7 +92,11 @@ class TorrentLogger:
                 conn.execute('CREATE INDEX IF NOT EXISTS idx_operation_type ON operations(operation_type)')
                 
         except Exception as e:
-            self.logger.error(f"Ошибка инициализации БД логов: {e}")
+            # На случай если logger ещё не готов, используем print как последний фолбэк
+            try:
+                self.logger.error(f"Ошибка инициализации БД логов: {e}")
+            except Exception:
+                print(f"[torrent_logger] Ошибка инициализации БД логов: {e}")
     
     def log_operation(self, operation: TorrentOperation) -> int:
         """Записать операцию в лог"""
@@ -105,7 +122,7 @@ class TorrentLogger:
                         operation.error_message
                     ))
                     
-                    operation_id = cursor.lastrowid
+                    operation_id = cursor.lastrowid or -1
                     
                     # Логируем в обычный лог
                     log_message = (

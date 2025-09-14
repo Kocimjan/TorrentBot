@@ -32,6 +32,9 @@ from src.cleanup_manager import CleanupManager
 from src.torrent_logger import torrent_logger
 from src.user_manager import user_manager
 
+# Гарантируем наличие директории логов до настройки логгера
+os.makedirs(LOGS_DIR, exist_ok=True)
+
 # Настройка логирования
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
