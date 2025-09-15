@@ -423,9 +423,10 @@ class TorrentBot:
                     # Проверяем размер файла
                     if file_size > MAX_FILE_SIZE:
                         # Файл слишком большой - предлагаем разбить
+                        safe_filename_big = self._escape_markdown(filename)
                         await self.application.bot.send_message(
                             chat_id=chat_id,
-                            text=f"📦 **{filename}** ({file_size / (1024**2):.1f} МБ)\n\n⚠️ Файл превышает лимит Telegram (50 МБ)\n📄 Разбиваю на части...",
+                            text=f"📦 {safe_filename_big} ({file_size / (1024**2):.1f} МБ)\n\n⚠️ Файл превышает лимит Telegram (50 МБ)\n📄 Разбиваю на части...",
                             parse_mode=ParseMode.MARKDOWN
                         )
                         
@@ -437,7 +438,7 @@ class TorrentBot:
                         safe_filename = self._escape_markdown(filename)
                         await self.application.bot.send_message(
                             chat_id=chat_id,
-                            text=f"📤 Отправляю файл {i}/{len(files)}: **{safe_filename}**",
+                            text=f"📤 Отправляю файл {i}/{len(files)}: {safe_filename}",
                             parse_mode=ParseMode.MARKDOWN
                         )
                         
@@ -453,9 +454,10 @@ class TorrentBot:
                 except Exception as e:
                     logger.error(f"Ошибка отправки файла {file_path}: {e}")
                     safe_filename_error = self._escape_markdown(filename)
+                    safe_error_text = self._escape_markdown(str(e))
                     await self.application.bot.send_message(
                         chat_id=chat_id,
-                        text=f"❌ Ошибка отправки файла **{safe_filename_error}**: {str(e)}",
+                        text=f"❌ Ошибка отправки файла {safe_filename_error}: {safe_error_text}",
                         parse_mode=ParseMode.MARKDOWN
                     )
             
@@ -479,6 +481,7 @@ class TorrentBot:
         """Разбить большой файл и отправить по частям (автоматически)"""
         try:
             filename = os.path.basename(file_path)
+            safe_filename = self._escape_markdown(filename)
             
             # Создаём временную директорию для частей
             temp_dir = os.path.join(TEMP_DIR, f"split_auto_{chat_id}")
@@ -490,7 +493,7 @@ class TorrentBot:
             if not parts:
                 await self.application.bot.send_message(
                     chat_id=chat_id,
-                    text=f"❌ Не удалось разбить файл **{filename}**",
+                    text=f"❌ Не удалось разбить файл {safe_filename}",
                     parse_mode=ParseMode.MARKDOWN
                 )
                 return
@@ -498,10 +501,11 @@ class TorrentBot:
             # Отправляем каждую часть
             for i, part_path in enumerate(parts, 1):
                 part_filename = os.path.basename(part_path)
+                safe_part_filename = self._escape_markdown(part_filename)
                 
                 await self.application.bot.send_message(
                     chat_id=chat_id,
-                    text=f"📤 Отправляю часть {i}/{len(parts)}: **{part_filename}**",
+                    text=f"📤 Отправляю часть {i}/{len(parts)}: {safe_part_filename}",
                     parse_mode=ParseMode.MARKDOWN
                 )
                 
@@ -514,12 +518,13 @@ class TorrentBot:
             
             # Отправляем инструкции по сборке
             first_part = os.path.basename(parts[0])
+            safe_first_part = self._escape_markdown(first_part)
             await self.application.bot.send_message(
                 chat_id=chat_id,
-                text=f"📋 **Инструкции по сборке файла {filename}:**\n\n"
+                text=f"📋 **Инструкции по сборке файла {safe_filename}:**\n\n"
                      f"1. Скачайте все {len(parts)} частей\n"
                      f"2. Поместите их в одну папку\n"
-                     f"3. Откройте первую часть **{first_part}** с помощью архиватора\n"
+                     f"3. Откройте первую часть {safe_first_part} с помощью архиватора\n"
                      f"4. Извлеките содержимое",
                 parse_mode=ParseMode.MARKDOWN
             )
@@ -528,10 +533,16 @@ class TorrentBot:
             self.file_manager.cleanup_directory(temp_dir)
             
         except Exception as e:
+            try:
+                filename = os.path.basename(file_path)
+                safe_filename_error = self._escape_markdown(filename)
+            except:
+                safe_filename_error = "Unknown file"
+            safe_error_text = self._escape_markdown(str(e))
             logger.error(f"Ошибка разбивки файла {file_path}: {e}")
             await self.application.bot.send_message(
                 chat_id=chat_id,
-                text=f"❌ **Ошибка разбивки файла**\n\n`{str(e)}`",
+                text=f"❌ **Ошибка разбивки файла**\n\n{safe_filename_error}: {safe_error_text}",
                 parse_mode=ParseMode.MARKDOWN
             )
     
