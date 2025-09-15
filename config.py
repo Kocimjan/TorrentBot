@@ -30,6 +30,15 @@ QBITTORRENT_PORT = 8080
 QBITTORRENT_USERNAME = "tbate"
 QBITTORRENT_PASSWORD = "aqwsderf"
 
+# Настройки Userbot для обхода ограничений
+USERBOT_API_ID = os.getenv("USERBOT_API_ID")  # Получить на https://my.telegram.org
+USERBOT_API_HASH = os.getenv("USERBOT_API_HASH")  # Получить на https://my.telegram.org
+USERBOT_PHONE = os.getenv("USERBOT_PHONE")  # Номер телефона userbot
+USERBOT_STORAGE_CHAT_ID = os.getenv("USERBOT_STORAGE_CHAT_ID")  # ID промежуточного чата/канала
+USERBOT_SESSION_NAME = os.getenv("USERBOT_SESSION_NAME", "userbot_session")
+USERBOT_WORKDIR = os.getenv("USERBOT_WORKDIR", "sessions")
+USERBOT_MAX_FILE_SIZE = int(os.getenv("USERBOT_MAX_FILE_SIZE", 50 * 1024 * 1024))  # 50 МБ
+
 # Ограничения размера файлов
 MAX_FILE_SIZE_DIRECT = 2 * 1024 * 1024 * 1024  # 2 ГБ
 SPLIT_CHUNK_SIZE = 1900 * 1024 * 1024  # 1.9 ГБ для частей
