@@ -219,6 +219,9 @@ class TorrentBot:
         # Получаем прогресс-бар для этого торрента
         progress_bar = progress_tracker.get_progress_bar(torrent_hash)
         
+        # Создаем очередь для обновлений прогресса
+        progress_queue = asyncio.Queue()
+        
         def progress_callback(info):
             """Колбэк для отправки обновлений прогресса"""
             try:
@@ -229,21 +232,56 @@ class TorrentBot:
                     # Создаем красивое сообщение с прогресс-баром
                     message = progress_bar.create_detailed_message(info)
                     
-                    # Отправляем обновление
-                    asyncio.create_task(
-                        self._send_progress_update(chat_id, message)
-                    )
-                    
-                    # Обновляем трекер
-                    progress_tracker.update_progress(torrent_hash, progress)
+                    # Добавляем обновление в очередь (без await)
+                    try:
+                        progress_queue.put_nowait({
+                            'message': message,
+                            'progress': progress
+                        })
+                    except asyncio.QueueFull:
+                        logger.warning("Очередь прогресса переполнена")
                     
             except Exception as e:
                 logger.error(f"Ошибка в progress_callback: {e}")
         
-        # Запускаем мониторинг в отдельной задаче
-        asyncio.create_task(
+        # Запускаем задачи мониторинга и обработки прогресса
+        monitor_task = asyncio.create_task(
             self._monitor_download(torrent_hash, chat_id, progress_callback)
         )
+        progress_task = asyncio.create_task(
+            self._process_progress_updates(progress_queue, chat_id, torrent_hash)
+        )
+        
+        # Ждем завершения мониторинга и останавливаем обработку прогресса
+        await monitor_task
+        progress_task.cancel()
+    
+    async def _process_progress_updates(self, progress_queue: asyncio.Queue, chat_id: int, torrent_hash: str):
+        """Обрабатывать обновления прогресса из очереди"""
+        try:
+            while True:
+                try:
+                    # Ждем обновление из очереди с таймаутом
+                    update_data = await asyncio.wait_for(progress_queue.get(), timeout=1.0)
+                    
+                    # Отправляем обновление
+                    await self._send_progress_update(chat_id, update_data['message'])
+                    
+                    # Обновляем трекер
+                    progress_tracker.update_progress(torrent_hash, update_data['progress'])
+                    
+                    # Помечаем задачу как выполненную
+                    progress_queue.task_done()
+                    
+                except asyncio.TimeoutError:
+                    # Таймаут - продолжаем ждать
+                    continue
+                    
+        except asyncio.CancelledError:
+            # Задача отменена - завершаем
+            logger.debug("Обработка прогресса остановлена")
+        except Exception as e:
+            logger.error(f"Ошибка обработки прогресса: {e}")
     
     async def _send_progress_update(self, chat_id: int, message: str):
         """Отправить обновление прогресса с обработкой ошибок"""
