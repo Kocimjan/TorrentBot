@@ -28,13 +28,14 @@ from config import (
 )
 
 # Константы Telegram
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 МБ - лимит Telegram
+MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 ГБ - лимит для userbot
 from src.torrent_client import TorrentClient
 from src.file_manager import FileManager
 from src.cleanup_manager import CleanupManager
 from src.torrent_logger import torrent_logger
 from src.user_manager import user_manager
 from src.progress_bar import progress_tracker
+from src.file_sender import SmartFileSender
 
 # Гарантируем наличие директории логов до настройки логгера
 os.makedirs(LOGS_DIR, exist_ok=True)
@@ -61,6 +62,7 @@ class TorrentBot:
         self.cleanup_manager = CleanupManager()
         self.active_downloads = {}  # {user_id: torrent_hash}
         self.application = None  # Будет установлено в main()
+        self.smart_file_sender = None  # Будет инициализирован после создания application
         
         # Запускаем планировщик очистки
         self.cleanup_manager.start_cleanup_scheduler(interval_hours=2)
@@ -434,7 +436,7 @@ class TorrentBot:
                         await self._split_and_send_file_auto(file_path, chat_id)
                         
                     else:
-                        # Отправляем файл как есть
+                        # Отправляем файл через SmartFileSender
                         safe_filename = self._escape_markdown(filename)
                         await self.application.bot.send_message(
                             chat_id=chat_id,
@@ -442,12 +444,27 @@ class TorrentBot:
                             parse_mode=ParseMode.MARKDOWN
                         )
                         
-                        with open(file_path, 'rb') as file:
-                            await self.application.bot.send_document(
+                        # Используем SmartFileSender для автоматического выбора метода отправки
+                        if self.smart_file_sender:
+                            success = await self.smart_file_sender.send_file(
                                 chat_id=chat_id,
-                                document=file,
-                                filename=filename
+                                file_path=file_path,
+                                filename=filename,
+                                caption=f"Файл {i}/{len(files)}: {filename}"
                             )
+                            
+                            if not success:
+                                logger.warning(f"SmartFileSender не смог отправить файл, используем разбивку: {filename}")
+                                # Fallback на разбивку
+                                await self._split_and_send_file_auto(file_path, chat_id)
+                        else:
+                            # Fallback если SmartFileSender не инициализирован
+                            with open(file_path, 'rb') as file:
+                                await self.application.bot.send_document(
+                                    chat_id=chat_id,
+                                    document=file,
+                                    filename=filename
+                                )
                     
                     sent_count += 1
                     
@@ -1163,6 +1180,9 @@ class TorrentBot:
         
         # Устанавливаем application в TorrentBot для отправки сообщений
         self.application = app
+        
+        # Инициализируем SmartFileSender
+        self.smart_file_sender = SmartFileSender(app.bot, self.file_manager)
         
         # Добавляем обработчики
         app.add_handler(CommandHandler("start", self.start_command))

@@ -31,9 +31,15 @@ class SmartFileSender:
         self.userbot_manager = None
         self.userbot_config = UserbotConfig.from_env()
         self.logger = logging.getLogger(f"{__name__}.SmartFileSender")
+        self._userbot_initialized = False
         
-        # Инициализируем userbot если настроен
-        asyncio.create_task(self._init_userbot())
+        # Userbot будет инициализирован при первом использовании
+    
+    async def _ensure_userbot_initialized(self):
+        """Убеждаемся, что userbot инициализирован (ленивая инициализация)."""
+        if not self._userbot_initialized:
+            await self._init_userbot()
+            self._userbot_initialized = True
     
     async def _init_userbot(self):
         """Инициализация userbot менеджера."""
@@ -81,11 +87,14 @@ class SmartFileSender:
         file_size = os.path.getsize(file_path)
         self.logger.info(f"Отправка файла: {filename} ({self._format_size(file_size)})")
         
+        # Инициализируем userbot если еще не инициализирован
+        await self._ensure_userbot_initialized()
+        
         # Определяем метод отправки
         if should_use_userbot(file_path, self.userbot_config) and self.userbot_manager:
             return await self._send_via_userbot(chat_id, file_path, filename, caption, progress_callback)
         else:
-            # Проверяем лимит Bot API
+            # Проверяем лимит Bot API (50 МБ - стандартный лимит Telegram Bot API)
             if file_size > 50 * 1024 * 1024:  # 50 МБ
                 return await self._send_via_split(chat_id, file_path, filename, caption)
             else:
@@ -257,17 +266,20 @@ class SmartFileSender:
             size_float /= 1024.0
         return f"{size_float:.1f} ТБ"
     
-    def is_userbot_available(self) -> bool:
+    async def is_userbot_available(self) -> bool:
         """Проверка доступности userbot."""
+        await self._ensure_userbot_initialized()
         return self.userbot_manager is not None and self.userbot_manager.is_available()
     
     async def get_userbot_stats(self) -> dict:
         """Получение статистики userbot."""
+        await self._ensure_userbot_initialized()
         if self.userbot_manager:
             return self.userbot_manager.get_storage_stats()
         return {}
     
     async def cleanup_userbot_cache(self, max_age_days: int = 30):
         """Очистка кэша userbot."""
+        await self._ensure_userbot_initialized()
         if self.userbot_manager:
             await self.userbot_manager.cleanup_old_files(max_age_days)
