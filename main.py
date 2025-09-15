@@ -373,6 +373,20 @@ class TorrentBot:
             # Очищаем данные торрента из трекера
             progress_tracker.cleanup_torrent(torrent_hash)
     
+    def _escape_markdown(self, text: str) -> str:
+        """Экранировать специальные символы для Markdown"""
+        if not text:
+            return "Unknown"
+        
+        # Символы, которые нужно экранировать в Markdown
+        escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+        
+        escaped_text = text
+        for char in escape_chars:
+            escaped_text = escaped_text.replace(char, f'\\{char}')
+        
+        return escaped_text
+    
     async def _send_completed_torrent_files(self, torrent_hash: str, chat_id: int):
         """Автоматически отправить файлы завершенного торрента"""
         try:
@@ -390,17 +404,20 @@ class TorrentBot:
             torrent_info = self.torrent_client.get_torrent_info(torrent_hash)
             torrent_name = torrent_info.get('name', 'Unknown') if torrent_info else 'Unknown'
             
+            # Экранируем имя торрента для безопасной отправки
+            safe_torrent_name = self._escape_markdown(torrent_name)
+            
             await self.application.bot.send_message(
                 chat_id=chat_id,
-                text=f"📂 **{torrent_name}**\n\n📁 Найдено файлов: {len(files)}\n📤 Начинаю отправку...",
+                text=f"📂 **{safe_torrent_name}**\n\n📁 Найдено файлов: {len(files)}\n📤 Начинаю отправку...",
                 parse_mode=ParseMode.MARKDOWN
             )
             
             # Отправляем файлы
             sent_count = 0
             for i, file_path in enumerate(files, 1):
+                filename = os.path.basename(file_path)
                 try:
-                    filename = os.path.basename(file_path)
                     file_size = self.file_manager.get_file_size(file_path)
                     
                     # Проверяем размер файла
@@ -417,9 +434,10 @@ class TorrentBot:
                         
                     else:
                         # Отправляем файл как есть
+                        safe_filename = self._escape_markdown(filename)
                         await self.application.bot.send_message(
                             chat_id=chat_id,
-                            text=f"📤 Отправляю файл {i}/{len(files)}: **{filename}**",
+                            text=f"📤 Отправляю файл {i}/{len(files)}: **{safe_filename}**",
                             parse_mode=ParseMode.MARKDOWN
                         )
                         
@@ -434,16 +452,18 @@ class TorrentBot:
                     
                 except Exception as e:
                     logger.error(f"Ошибка отправки файла {file_path}: {e}")
+                    safe_filename_error = self._escape_markdown(filename)
                     await self.application.bot.send_message(
                         chat_id=chat_id,
-                        text=f"❌ Ошибка отправки файла **{filename}**: {str(e)}",
+                        text=f"❌ Ошибка отправки файла **{safe_filename_error}**: {str(e)}",
                         parse_mode=ParseMode.MARKDOWN
                     )
             
             # Итоговое сообщение
+            safe_torrent_name_final = self._escape_markdown(torrent_name)
             await self.application.bot.send_message(
                 chat_id=chat_id,
-                text=f"✅ **Отправка завершена!**\n\n📊 Успешно отправлено: {sent_count}/{len(files)} файлов\n🎉 Торрент **{torrent_name}** обработан полностью!",
+                text=f"✅ **Отправка завершена!**\n\n📊 Успешно отправлено: {sent_count}/{len(files)} файлов\n🎉 Торрент **{safe_torrent_name_final}** обработан полностью!",
                 parse_mode=ParseMode.MARKDOWN
             )
             
