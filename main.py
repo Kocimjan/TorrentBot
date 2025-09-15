@@ -26,6 +26,9 @@ from config import (
     BOT_TOKEN, AUTHORIZED_USERS, TEMP_DIR, LOGS_DIR,
     LOG_LEVEL, LOG_FORMAT, MESSAGES
 )
+
+# Константы Telegram
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 МБ - лимит Telegram
 from src.torrent_client import TorrentClient
 from src.file_manager import FileManager
 from src.cleanup_manager import CleanupManager
@@ -338,11 +341,20 @@ class TorrentBot:
                         parse_mode=ParseMode.MARKDOWN
                     )
                 
-                # Уведомляем о готовности файлов для скачивания
+                # Автоматически отправляем файлы после завершения
                 await self.application.bot.send_message(
                     chat_id=chat_id,
-                    text="📁 Торрент скачан! Используйте /status для просмотра доступных файлов."
+                    text="📤 Подготавливаю файлы для отправки..."
                 )
+                
+                try:
+                    await self._send_completed_torrent_files(torrent_hash, chat_id)
+                except Exception as e:
+                    logger.error(f"Ошибка отправки файлов: {e}")
+                    await self.application.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"❌ Ошибка отправки файлов: {str(e)}\n\nИспользуйте /status для ручной отправки."
+                    )
             else:
                 await self.application.bot.send_message(
                     chat_id=chat_id,
@@ -360,6 +372,148 @@ class TorrentBot:
         finally:
             # Очищаем данные торрента из трекера
             progress_tracker.cleanup_torrent(torrent_hash)
+    
+    async def _send_completed_torrent_files(self, torrent_hash: str, chat_id: int):
+        """Автоматически отправить файлы завершенного торрента"""
+        try:
+            # Получаем список файлов
+            files = self.torrent_client.get_torrent_files(torrent_hash)
+            
+            if not files:
+                await self.application.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Файлы торрента не найдены"
+                )
+                return
+            
+            # Получаем информацию о торренте
+            torrent_info = self.torrent_client.get_torrent_info(torrent_hash)
+            torrent_name = torrent_info.get('name', 'Unknown') if torrent_info else 'Unknown'
+            
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=f"📂 **{torrent_name}**\n\n📁 Найдено файлов: {len(files)}\n📤 Начинаю отправку...",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            # Отправляем файлы
+            sent_count = 0
+            for i, file_path in enumerate(files, 1):
+                try:
+                    filename = os.path.basename(file_path)
+                    file_size = self.file_manager.get_file_size(file_path)
+                    
+                    # Проверяем размер файла
+                    if file_size > MAX_FILE_SIZE:
+                        # Файл слишком большой - предлагаем разбить
+                        await self.application.bot.send_message(
+                            chat_id=chat_id,
+                            text=f"📦 **{filename}** ({file_size / (1024**2):.1f} МБ)\n\n⚠️ Файл превышает лимит Telegram (50 МБ)\n📄 Разбиваю на части...",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                        
+                        # Разбиваем и отправляем по частям
+                        await self._split_and_send_file_auto(file_path, chat_id)
+                        
+                    else:
+                        # Отправляем файл как есть
+                        await self.application.bot.send_message(
+                            chat_id=chat_id,
+                            text=f"📤 Отправляю файл {i}/{len(files)}: **{filename}**",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                        
+                        with open(file_path, 'rb') as file:
+                            await self.application.bot.send_document(
+                                chat_id=chat_id,
+                                document=file,
+                                filename=filename
+                            )
+                    
+                    sent_count += 1
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка отправки файла {file_path}: {e}")
+                    await self.application.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"❌ Ошибка отправки файла **{filename}**: {str(e)}",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+            
+            # Итоговое сообщение
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ **Отправка завершена!**\n\n📊 Успешно отправлено: {sent_count}/{len(files)} файлов\n🎉 Торрент **{torrent_name}** обработан полностью!",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка автоматической отправки файлов: {e}")
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ **Ошибка автоматической отправки**\n\n`{str(e)}`\n\nИспользуйте /status для ручной отправки файлов.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+    
+    async def _split_and_send_file_auto(self, file_path: str, chat_id: int):
+        """Разбить большой файл и отправить по частям (автоматически)"""
+        try:
+            filename = os.path.basename(file_path)
+            
+            # Создаём временную директорию для частей
+            temp_dir = os.path.join(TEMP_DIR, f"split_auto_{chat_id}")
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            # Разбиваем файл
+            parts = self.file_manager.split_file_7z(file_path, temp_dir)
+            
+            if not parts:
+                await self.application.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"❌ Не удалось разбить файл **{filename}**",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            
+            # Отправляем каждую часть
+            for i, part_path in enumerate(parts, 1):
+                part_filename = os.path.basename(part_path)
+                
+                await self.application.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"📤 Отправляю часть {i}/{len(parts)}: **{part_filename}**",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                
+                with open(part_path, 'rb') as part_file:
+                    await self.application.bot.send_document(
+                        chat_id=chat_id,
+                        document=part_file,
+                        filename=part_filename
+                    )
+            
+            # Отправляем инструкции по сборке
+            first_part = os.path.basename(parts[0])
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=f"📋 **Инструкции по сборке файла {filename}:**\n\n"
+                     f"1. Скачайте все {len(parts)} частей\n"
+                     f"2. Поместите их в одну папку\n"
+                     f"3. Откройте первую часть **{first_part}** с помощью архиватора\n"
+                     f"4. Извлеките содержимое",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            # Очищаем временные файлы
+            self.file_manager.cleanup_directory(temp_dir)
+            
+        except Exception as e:
+            logger.error(f"Ошибка разбивки файла {file_path}: {e}")
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ **Ошибка разбивки файла**\n\n`{str(e)}`",
+                parse_mode=ParseMode.MARKDOWN
+            )
     
     async def _process_downloaded_files(self, update: Update, context: ContextTypes.DEFAULT_TYPE,
                                       torrent_hash: str, user_id: int):
