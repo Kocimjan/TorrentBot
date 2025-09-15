@@ -8,7 +8,7 @@ from typing import List
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Telegram Bot API
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "6510728909:AAEZq4Vf35TBTIk_G2hH-RrF4oOYazYs0Ms")
 
 # Авторизованные пользователи (ID Telegram)
 AUTHORIZED_USERS: List[int] = [
@@ -25,10 +25,10 @@ TEMP_DIR = os.path.join(BASE_DIR, "temp")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
 
 # Настройки торрент-клиента (qBittorrent)
-QBITTORRENT_HOST = "localhost"
+QBITTORRENT_HOST = "45.153.71.119"
 QBITTORRENT_PORT = 8080
 QBITTORRENT_USERNAME = "tbate"
-QBITTORRENT_PASSWORD = "19739"
+QBITTORRENT_PASSWORD = "aqwsderf"
 
 # Ограничения размера файлов
 MAX_FILE_SIZE_DIRECT = 2 * 1024 * 1024 * 1024  # 2 ГБ

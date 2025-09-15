@@ -4,7 +4,7 @@
 import os
 import time
 import logging
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 import qbittorrentapi
 import tempfile
 import requests
@@ -22,7 +22,7 @@ class TorrentClient:
     """Клиент для работы с qBittorrent"""
     
     def __init__(self):
-        self.client = None
+        self.client: Optional[qbittorrentapi.Client] = None
         self.downloads_dir = DOWNLOADS_DIR
         self._connect()
     
@@ -98,6 +98,18 @@ class TorrentClient:
             if not self.is_connected():
                 raise Exception("Не удалось подключиться к qBittorrent")
             
+            logger.info(f"Добавление торрент-файла: {filename} (размер: {len(torrent_data)} байт)")
+            
+            # Получаем список торрентов до добавления
+            existing_torrents = set()
+            try:
+                if self.client:
+                    existing_list = self.client.torrents_info()
+                    existing_torrents = {t.hash for t in existing_list}
+                    logger.info(f"Существующих торрентов: {len(existing_torrents)}")
+            except Exception as e:
+                logger.warning(f"Не удалось получить список существующих торрентов: {e}")
+            
             # Сохраняем торрент во временный файл
             with tempfile.NamedTemporaryFile(suffix='.torrent', delete=False) as temp_file:
                 temp_file.write(torrent_data)
@@ -105,28 +117,71 @@ class TorrentClient:
             
             try:
                 # Добавляем торрент
+                logger.info(f"Отправка торрента в qBittorrent...")
+                if not self.client:
+                    raise Exception("Клиент qBittorrent не подключен")
+                    
                 result = self.client.torrents_add(
                     torrent_files=temp_file_path,
                     save_path=self.downloads_dir
                 )
                 
+                logger.info(f"Результат добавления: {result}")
+                
                 # Получаем hash добавленного торрента
                 if result == "Ok.":
-                    # Ждём немного, чтобы торрент появился в списке
-                    time.sleep(1)
+                    # Ждём, чтобы торрент появился в списке
+                    for attempt in range(10):  # Пытаемся 10 раз
+                        time.sleep(0.5)  # Ждём 500мс между попытками
+                        
+                        try:
+                            if not self.client:
+                                break
+                            current_torrents = self.client.torrents_info()
+                            current_hashes = {t.hash for t in current_torrents}
+                            
+                            # Ищем новые торренты
+                            new_torrents = current_hashes - existing_torrents
+                            
+                            if new_torrents:
+                                new_hash = list(new_torrents)[0]
+                                # Получаем информацию о новом торренте
+                                for torrent in current_torrents:
+                                    if torrent.hash == new_hash:
+                                        logger.info(f"Торрент успешно добавлен: {torrent.name} ({torrent.hash})")
+                                        return torrent.hash
+                            
+                            logger.info(f"Попытка {attempt + 1}/10: торрент ещё не появился в списке")
+                            
+                        except Exception as e:
+                            logger.warning(f"Ошибка при проверке торрентов (попытка {attempt + 1}): {e}")
                     
-                    # Ищем торрент по имени файла
-                    torrents = self.client.torrents_info()
-                    for torrent in torrents:
-                        if torrent.name in filename or filename in torrent.name:
-                            logger.info(f"Торрент добавлен: {torrent.name} ({torrent.hash})")
-                            return torrent.hash
-                    
-                    # Если не нашли по имени, берём последний добавленный
-                    if torrents:
-                        latest_torrent = max(torrents, key=lambda t: t.added_on)
-                        logger.info(f"Торрент добавлен: {latest_torrent.name} ({latest_torrent.hash})")
-                        return latest_torrent.hash
+                    # Если новых торрентов не найдено, пытаемся найти по имени
+                    logger.warning("Не удалось найти новый торрент, ищем по имени файла...")
+                    try:
+                        if not self.client:
+                            return None
+                        all_torrents = self.client.torrents_info()
+                        base_filename = os.path.splitext(filename)[0]  # Убираем расширение .torrent
+                        
+                        for torrent in all_torrents:
+                            # Проверяем различные варианты совпадения имён
+                            if (base_filename.lower() in torrent.name.lower() or 
+                                torrent.name.lower() in base_filename.lower() or
+                                filename.lower() in torrent.name.lower()):
+                                logger.info(f"Найден торрент по имени: {torrent.name} ({torrent.hash})")
+                                return torrent.hash
+                        
+                        # Последняя попытка - берём самый последний добавленный
+                        if all_torrents:
+                            latest_torrent = max(all_torrents, key=lambda t: t.added_on)
+                            logger.info(f"Взят последний добавленный торрент: {latest_torrent.name} ({latest_torrent.hash})")
+                            return latest_torrent.hash
+                            
+                    except Exception as e:
+                        logger.error(f"Ошибка поиска торрента по имени: {e}")
+                else:
+                    logger.error(f"qBittorrent вернул ошибку: {result}")
                 
                 return None
                 
@@ -134,11 +189,11 @@ class TorrentClient:
                 # Удаляем временный файл
                 try:
                     os.unlink(temp_file_path)
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Не удалось удалить временный файл: {e}")
                     
         except Exception as e:
-            logger.error(f"Ошибка добавления торрент-файла: {e}")
+            logger.error(f"Ошибка добавления торрент-файла: {e}", exc_info=True)
             return None
     
     def add_magnet_link(self, magnet_link: str) -> Optional[str]:
@@ -150,8 +205,19 @@ class TorrentClient:
             if not self.is_connected():
                 self._connect()
                 
-            if not self.is_connected():
+            if not self.is_connected() or not self.client:
                 raise Exception("Не удалось подключиться к qBittorrent")
+            
+            logger.info(f"Добавление magnet-ссылки...")
+            
+            # Получаем список торрентов до добавления
+            existing_torrents = set()
+            try:
+                existing_list = self.client.torrents_info()
+                existing_torrents = {t.hash for t in existing_list}
+                logger.info(f"Существующих торрентов: {len(existing_torrents)}")
+            except Exception as e:
+                logger.warning(f"Не удалось получить список существующих торрентов: {e}")
             
             # Добавляем магнет-ссылку
             result = self.client.torrents_add(
@@ -159,28 +225,55 @@ class TorrentClient:
                 save_path=self.downloads_dir
             )
             
+            logger.info(f"Результат добавления magnet: {result}")
+            
             if result == "Ok.":
                 # Ждём, чтобы торрент появился в списке
-                time.sleep(2)
+                for attempt in range(15):  # Для magnet-ссылок может понадобиться больше времени
+                    time.sleep(1)  # Ждём 1 секунду между попытками
+                    
+                    try:
+                        current_torrents = self.client.torrents_info()
+                        current_hashes = {t.hash for t in current_torrents}
+                        
+                        # Ищем новые торренты
+                        new_torrents = current_hashes - existing_torrents
+                        
+                        if new_torrents:
+                            new_hash = list(new_torrents)[0]
+                            # Получаем информацию о новом торренте
+                            for torrent in current_torrents:
+                                if torrent.hash == new_hash:
+                                    logger.info(f"Magnet-ссылка успешно добавлена: {torrent.name} ({torrent.hash})")
+                                    return torrent.hash
+                        
+                        logger.info(f"Попытка {attempt + 1}/15: торрент ещё не появился в списке")
+                        
+                    except Exception as e:
+                        logger.warning(f"Ошибка при проверке торрентов (попытка {attempt + 1}): {e}")
                 
-                # Пытаемся найти добавленный торрент
-                torrents = self.client.torrents_info()
-                if torrents:
-                    # Берём последний добавленный
-                    latest_torrent = max(torrents, key=lambda t: t.added_on)
-                    logger.info(f"Магнет-ссылка добавлена: {latest_torrent.name} ({latest_torrent.hash})")
-                    return latest_torrent.hash
+                # Последняя попытка - берём самый последний добавленный
+                try:
+                    all_torrents = self.client.torrents_info()
+                    if all_torrents:
+                        latest_torrent = max(all_torrents, key=lambda t: t.added_on)
+                        logger.info(f"Взят последний добавленный торрент: {latest_torrent.name} ({latest_torrent.hash})")
+                        return latest_torrent.hash
+                except Exception as e:
+                    logger.error(f"Ошибка получения последнего торрента: {e}")
+            else:
+                logger.error(f"qBittorrent вернул ошибку: {result}")
             
             return None
             
         except Exception as e:
-            logger.error(f"Ошибка добавления magnet-ссылки: {e}")
+            logger.error(f"Ошибка добавления magnet-ссылки: {e}", exc_info=True)
             return None
     
     def get_torrent_info(self, torrent_hash: str) -> Optional[Dict[str, Any]]:
         """Получить информацию о торренте"""
         try:
-            if not self.is_connected():
+            if not self.is_connected() or not self.client:
                 return None
             
             torrents = self.client.torrents_info(torrent_hashes=torrent_hash)
@@ -245,7 +338,7 @@ class TorrentClient:
     def get_torrent_files(self, torrent_hash: str) -> List[str]:
         """Получить список файлов торрента"""
         try:
-            if not self.is_connected():
+            if not self.is_connected() or not self.client:
                 return []
             
             # Получаем информацию о торренте
@@ -273,7 +366,7 @@ class TorrentClient:
     def remove_torrent(self, torrent_hash: str, delete_files: bool = False):
         """Удалить торрент из клиента"""
         try:
-            if not self.is_connected():
+            if not self.is_connected() or not self.client:
                 return
             
             self.client.torrents_delete(
@@ -289,7 +382,7 @@ class TorrentClient:
     def pause_torrent(self, torrent_hash: str):
         """Поставить торрент на паузу"""
         try:
-            if not self.is_connected():
+            if not self.is_connected() or not self.client:
                 return
             
             self.client.torrents_pause(torrent_hashes=torrent_hash)
@@ -301,7 +394,7 @@ class TorrentClient:
     def resume_torrent(self, torrent_hash: str):
         """Возобновить скачивание торрента"""
         try:
-            if not self.is_connected():
+            if not self.is_connected() or not self.client:
                 return
             
             self.client.torrents_resume(torrent_hashes=torrent_hash)
