@@ -57,6 +57,7 @@ class TorrentBot:
         self.file_manager = FileManager()
         self.cleanup_manager = CleanupManager()
         self.active_downloads = {}  # {user_id: torrent_hash}
+        self.application = None  # Будет установлено в main()
         
         # Запускаем планировщик очистки
         self.cleanup_manager.start_cleanup_scheduler(interval_hours=2)
@@ -213,10 +214,8 @@ class TorrentBot:
                 MESSAGES["error"].format(error=str(e))
             )
     
-    async def _start_download_monitoring(self, update: Update, context: ContextTypes.DEFAULT_TYPE, torrent_hash: str):
+    async def _start_download_monitoring(self, torrent_hash: str, chat_id: int):
         """Запустить мониторинг скачивания торрента"""
-        user_id = update.effective_user.id
-        
         # Получаем прогресс-бар для этого торрента
         progress_bar = progress_tracker.get_progress_bar(torrent_hash)
         
@@ -232,7 +231,7 @@ class TorrentBot:
                     
                     # Отправляем обновление
                     asyncio.create_task(
-                        self._send_progress_update(update, message, torrent_hash)
+                        self._send_progress_update(chat_id, message)
                     )
                     
                     # Обновляем трекер
@@ -243,15 +242,16 @@ class TorrentBot:
         
         # Запускаем мониторинг в отдельной задаче
         asyncio.create_task(
-            self._monitor_download(update, context, torrent_hash, user_id, progress_callback)
+            self._monitor_download(torrent_hash, chat_id, progress_callback)
         )
     
-    async def _send_progress_update(self, update: Update, message: str, torrent_hash: str):
+    async def _send_progress_update(self, chat_id: int, message: str):
         """Отправить обновление прогресса с обработкой ошибок"""
         try:
             # Используем Markdown для красивого форматирования
-            await update.message.reply_text(
-                message,
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=message,
                 parse_mode=ParseMode.MARKDOWN,
                 disable_notification=True  # Не беспокоим уведомлениями
             )
@@ -260,17 +260,23 @@ class TorrentBot:
             # Пробуем отправить без форматирования
             try:
                 plain_message = message.replace('**', '').replace('*', '')
-                await update.message.reply_text(plain_message, disable_notification=True)
+                await self.application.bot.send_message(
+                    chat_id=chat_id,
+                    text=plain_message,
+                    disable_notification=True
+                )
             except Exception as e2:
                 logger.error(f"Не удалось отправить даже простое сообщение: {e2}")
     
-    async def _monitor_download(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
-                              torrent_hash: str, user_id: int, progress_callback=None):
+    async def _monitor_download(self, torrent_hash: str, chat_id: int, progress_callback=None):
         """Мониторинг скачивания торрента с прогресс-баром"""
         success = False
         try:
             # Отправляем начальное сообщение
-            await update.message.reply_text("🚀 Начинаем мониторинг скачивания...")
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text="🚀 Начинаем мониторинг скачивания..."
+            )
             
             # Ждём завершения скачивания с callback для прогресса
             success = await asyncio.get_event_loop().run_in_executor(
@@ -288,41 +294,34 @@ class TorrentBot:
                     progress_bar = progress_tracker.get_progress_bar(torrent_hash)
                     final_message = progress_bar.create_detailed_message(info)
                     
-                    await update.message.reply_text(
-                        f"🎉 **Скачивание завершено!**\n\n{final_message}",
+                    await self.application.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"🎉 **Скачивание завершено!**\n\n{final_message}",
                         parse_mode=ParseMode.MARKDOWN
                     )
                 
-                # Обрабатываем скачанные файлы
-                await self._process_downloaded_files(update, context, torrent_hash, user_id)
+                # Уведомляем о готовности файлов для скачивания
+                await self.application.bot.send_message(
+                    chat_id=chat_id,
+                    text="📁 Торрент скачан! Используйте /status для просмотра доступных файлов."
+                )
             else:
-                await update.message.reply_text(
-                    "❌ **Ошибка скачивания торрента**\n\nВозможные причины:\n• Нет доступных пиров\n• Ошибка диска\n• Торрент поврежден",
+                await self.application.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ **Ошибка скачивания торрента**\n\nВозможные причины:\n• Нет доступных пиров\n• Ошибка диска\n• Торрент поврежден",
                     parse_mode=ParseMode.MARKDOWN
                 )
             
         except Exception as e:
             logger.error(f"Ошибка мониторинга скачивания: {e}")
-            await update.message.reply_text(
-                f"❌ **Критическая ошибка мониторинга**\n\n`{str(e)}`",
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ **Критическая ошибка мониторинга**\n\n`{str(e)}`",
                 parse_mode=ParseMode.MARKDOWN
             )
         finally:
             # Очищаем данные торрента из трекера
             progress_tracker.cleanup_torrent(torrent_hash)
-            
-            # Удаляем из активных загрузок
-            if user_id in self.active_downloads:
-                download_info = self.active_downloads[user_id]
-                operation_id = download_info.get('operation_id')
-                
-                if not success and operation_id:
-                    torrent_logger.log_error(operation_id, "Ошибка скачивания торрента")
-                
-                del self.active_downloads[user_id]
-                
-                # Очищаем файлы пользователя
-                self.cleanup_manager.cleanup_user_files(user_id)
     
     async def _process_downloaded_files(self, update: Update, context: ContextTypes.DEFAULT_TYPE,
                                       torrent_hash: str, user_id: int):
@@ -938,6 +937,9 @@ class TorrentBot:
         
         # Создаём приложение
         app = ApplicationBuilder().token(BOT_TOKEN).build()
+        
+        # Устанавливаем application в TorrentBot для отправки сообщений
+        self.application = app
         
         # Добавляем обработчики
         app.add_handler(CommandHandler("start", self.start_command))
