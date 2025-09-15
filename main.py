@@ -31,6 +31,7 @@ from src.file_manager import FileManager
 from src.cleanup_manager import CleanupManager
 from src.torrent_logger import torrent_logger
 from src.user_manager import user_manager
+from src.progress_bar import progress_tracker
 
 # Гарантируем наличие директории логов до настройки логгера
 os.makedirs(LOGS_DIR, exist_ok=True)
@@ -98,11 +99,11 @@ class TorrentBot:
             return
         
         try:
-            await update.message.reply_text(MESSAGES["processing"])
+            status_message = await update.message.reply_text("⏳ Обрабатываю торрент-файл...")
             
             # Проверяем подключение к qBittorrent
             if not self.torrent_client.is_connected():
-                await update.message.reply_text(
+                await status_message.edit_text(
                     "❌ qBittorrent недоступен. Убедитесь, что:\n"
                     "1. qBittorrent запущен\n"
                     "2. Web UI включен в настройках\n"
@@ -134,10 +135,14 @@ class TorrentBot:
                     'torrent_hash': torrent_hash,
                     'operation_id': operation_id
                 }
-                await self._start_download_monitoring(update, context, torrent_hash)
+                
+                await status_message.edit_text(f"✅ Торрент добавлен! Hash: `{torrent_hash}`")
+                
+                # Запускаем мониторинг с прогресс-баром
+                await self._start_download_monitoring(torrent_hash, update.effective_chat.id)
             else:
-                await update.message.reply_text(
-                    MESSAGES["error"].format(error="Не удалось добавить торрент")
+                await status_message.edit_text(
+                    "❌ Не удалось добавить торрент"
                 )
                 
         except Exception as e:
@@ -164,11 +169,11 @@ class TorrentBot:
             return
         
         try:
-            await update.message.reply_text(MESSAGES["processing"])
+            status_message = await update.message.reply_text("⏳ Добавляю торрент...")
             
             # Проверяем подключение к qBittorrent
             if not self.torrent_client.is_connected():
-                await update.message.reply_text(
+                await status_message.edit_text(
                     "❌ qBittorrent недоступен. Убедитесь, что:\n"
                     "1. qBittorrent запущен\n"
                     "2. Web UI включен в настройках\n"
@@ -192,10 +197,14 @@ class TorrentBot:
                     'torrent_hash': torrent_hash,
                     'operation_id': operation_id
                 }
-                await self._start_download_monitoring(update, context, torrent_hash)
+                
+                await status_message.edit_text(f"✅ Торрент добавлен! Hash: `{torrent_hash}`")
+                
+                # Запускаем мониторинг с прогресс-баром
+                await self._start_download_monitoring(torrent_hash, update.effective_chat.id)
             else:
-                await update.message.reply_text(
-                    MESSAGES["error"].format(error="Не удалось добавить magnet-ссылку")
+                await status_message.edit_text(
+                    "❌ Не удалось добавить магнет-ссылку"
                 )
                 
         except Exception as e:
@@ -208,53 +217,100 @@ class TorrentBot:
         """Запустить мониторинг скачивания торрента"""
         user_id = update.effective_user.id
         
+        # Получаем прогресс-бар для этого торрента
+        progress_bar = progress_tracker.get_progress_bar(torrent_hash)
+        
         def progress_callback(info):
             """Колбэк для отправки обновлений прогресса"""
-            # Отправляем обновления каждые 10% или каждые 2 минуты
-            progress = info['progress']
-            if progress % 10 == 0:  # Каждые 10%
-                asyncio.create_task(
-                    update.message.reply_text(
-                        MESSAGES["downloading"].format(
-                            name=info['name'], 
-                            progress=f"{progress:.1f}"
-                        )
+            try:
+                progress = info['progress']
+                
+                # Проверяем, нужно ли отправлять обновление
+                if progress_tracker.should_update(torrent_hash, progress):
+                    # Создаем красивое сообщение с прогресс-баром
+                    message = progress_bar.create_detailed_message(info)
+                    
+                    # Отправляем обновление
+                    asyncio.create_task(
+                        self._send_progress_update(update, message, torrent_hash)
                     )
-                )
+                    
+                    # Обновляем трекер
+                    progress_tracker.update_progress(torrent_hash, progress)
+                    
+            except Exception as e:
+                logger.error(f"Ошибка в progress_callback: {e}")
         
         # Запускаем мониторинг в отдельной задаче
         asyncio.create_task(
-            self._monitor_download(update, context, torrent_hash, user_id)
+            self._monitor_download(update, context, torrent_hash, user_id, progress_callback)
         )
     
-    async def _monitor_download(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
-                              torrent_hash: str, user_id: int):
-        """Мониторинг скачивания торрента"""
+    async def _send_progress_update(self, update: Update, message: str, torrent_hash: str):
+        """Отправить обновление прогресса с обработкой ошибок"""
         try:
-            # Ждём завершения скачивания
-            success = self.torrent_client.wait_for_completion(torrent_hash)
+            # Используем Markdown для красивого форматирования
+            await update.message.reply_text(
+                message,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_notification=True  # Не беспокоим уведомлениями
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось отправить обновление прогресса: {e}")
+            # Пробуем отправить без форматирования
+            try:
+                plain_message = message.replace('**', '').replace('*', '')
+                await update.message.reply_text(plain_message, disable_notification=True)
+            except Exception as e2:
+                logger.error(f"Не удалось отправить даже простое сообщение: {e2}")
+    
+    async def _monitor_download(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                              torrent_hash: str, user_id: int, progress_callback=None):
+        """Мониторинг скачивания торрента с прогресс-баром"""
+        success = False
+        try:
+            # Отправляем начальное сообщение
+            await update.message.reply_text("🚀 Начинаем мониторинг скачивания...")
+            
+            # Ждём завершения скачивания с callback для прогресса
+            success = await asyncio.get_event_loop().run_in_executor(
+                None, 
+                self.torrent_client.wait_for_completion, 
+                torrent_hash, 
+                progress_callback
+            )
             
             if success:
-                # Получаем информацию о торренте
+                # Получаем финальную информацию о торренте
                 info = self.torrent_client.get_torrent_info(torrent_hash)
                 if info:
+                    # Создаем финальное сообщение с прогресс-баром
+                    progress_bar = progress_tracker.get_progress_bar(torrent_hash)
+                    final_message = progress_bar.create_detailed_message(info)
+                    
                     await update.message.reply_text(
-                        MESSAGES["download_complete"].format(name=info['name'])
+                        f"🎉 **Скачивание завершено!**\n\n{final_message}",
+                        parse_mode=ParseMode.MARKDOWN
                     )
                 
                 # Обрабатываем скачанные файлы
                 await self._process_downloaded_files(update, context, torrent_hash, user_id)
             else:
                 await update.message.reply_text(
-                    MESSAGES["error"].format(error="Ошибка скачивания торрента")
+                    "❌ **Ошибка скачивания торрента**\n\nВозможные причины:\n• Нет доступных пиров\n• Ошибка диска\n• Торрент поврежден",
+                    parse_mode=ParseMode.MARKDOWN
                 )
             
         except Exception as e:
             logger.error(f"Ошибка мониторинга скачивания: {e}")
             await update.message.reply_text(
-                MESSAGES["error"].format(error=str(e))
+                f"❌ **Критическая ошибка мониторинга**\n\n`{str(e)}`",
+                parse_mode=ParseMode.MARKDOWN
             )
         finally:
+            # Очищаем данные торрента из трекера
+            progress_tracker.cleanup_torrent(torrent_hash)
+            
             # Удаляем из активных загрузок
             if user_id in self.active_downloads:
                 download_info = self.active_downloads[user_id]
@@ -428,38 +484,126 @@ class TorrentBot:
             )
     
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Команда для получения статуса активных загрузок"""
+        """Показать статус всех торрентов с прогресс-барами"""
         user_id = update.effective_user.id
         
         if not self.check_authorization(user_id):
             await update.message.reply_text(MESSAGES["unauthorized"])
             return
         
-        if user_id not in self.active_downloads:
-            await update.message.reply_text("📭 Нет активных загрузок")
-            return
-        
-        download_info = self.active_downloads[user_id]
-        torrent_hash = download_info['torrent_hash']
-        info = self.torrent_client.get_torrent_info(torrent_hash)
-        
-        if info:
-            status_text = f"📊 Статус загрузки:\n\n"
-            status_text += f"📁 Имя: {info['name']}\n"
-            status_text += f"📈 Прогресс: {info['progress']:.1f}%\n"
-            status_text += f"📦 Размер: {self.file_manager.format_file_size(info['size'])}\n"
-            status_text += f"💾 Скачано: {self.file_manager.format_file_size(info['downloaded'])}\n"
-            status_text += f"⚡ Скорость: {self.file_manager.format_file_size(info['download_speed'])}/с\n"
-            status_text += f"🔄 Состояние: {info['state']}"
+        try:
+            if not self.torrent_client.is_connected():
+                await update.message.reply_text("❌ **Нет подключения к qBittorrent**", parse_mode=ParseMode.MARKDOWN)
+                return
             
-            if info['eta'] > 0:
-                eta_hours = info['eta'] // 3600
-                eta_minutes = (info['eta'] % 3600) // 60
-                status_text += f"\n⏰ Осталось: {eta_hours}ч {eta_minutes}м"
+            # Получаем все торренты
+            torrents = self.torrent_client.client.torrents_info()
             
-            await update.message.reply_text(status_text)
-        else:
-            await update.message.reply_text("❌ Не удалось получить статус")
+            if not torrents:
+                await update.message.reply_text("📭 **Нет активных торрентов**", parse_mode=ParseMode.MARKDOWN)
+                return
+            
+            # Группируем торренты по состояниям
+            downloading = []
+            completed = []
+            uploading = []
+            paused = []
+            errors = []
+            
+            for torrent in torrents:
+                info = self.torrent_client.get_torrent_info(torrent.hash)
+                if info:
+                    state = info['state']
+                    if state in ['downloading', 'stalledDL', 'queuedDL']:
+                        downloading.append(info)
+                    elif state in ['uploading', 'stalledUP', 'queuedUP']:
+                        if info['progress'] >= 100:
+                            completed.append(info)
+                        else:
+                            uploading.append(info)
+                    elif state in ['pausedDL', 'pausedUP']:
+                        paused.append(info)
+                    elif state in ['error', 'missingFiles']:
+                        errors.append(info)
+            
+            # Создаем сообщение со статистикой
+            messages = []
+            
+            if downloading:
+                messages.append("⬇️ **Скачиваются:**")
+                for info in downloading:
+                    progress_bar = progress_tracker.get_progress_bar(info['hash'])
+                    progress_line = progress_bar.create_bar(info['progress'])
+                    speed = progress_bar.format_speed(info['download_speed'])
+                    name = info['name'][:30] + ('...' if len(info['name']) > 30 else '')
+                    messages.append(f"`{progress_line}`")
+                    messages.append(f"📁 {name}")
+                    messages.append(f"⚡ {speed}")
+                    messages.append("")
+            
+            if completed:
+                messages.append("✅ **Завершены:**")
+                for info in completed:
+                    name = info['name'][:40] + ('...' if len(info['name']) > 40 else '')
+                    size = progress_tracker.get_progress_bar('').format_size(info['size'])
+                    ratio = info.get('ratio', 0)
+                    messages.append(f"📁 {name}")
+                    messages.append(f"💾 {size} | 📤 Рейтинг: {ratio:.2f}")
+                    messages.append("")
+            
+            if uploading:
+                messages.append("⬆️ **Раздаются:**")
+                for info in uploading:
+                    name = info['name'][:40] + ('...' if len(info['name']) > 40 else '')
+                    up_speed = progress_tracker.get_progress_bar('').format_speed(info.get('upspeed', 0))
+                    messages.append(f"📁 {name}")
+                    messages.append(f"⚡ {up_speed}")
+                    messages.append("")
+            
+            if paused:
+                messages.append("⏸️ **Приостановлены:**")
+                for info in paused:
+                    name = info['name'][:40] + ('...' if len(info['name']) > 40 else '')
+                    messages.append(f"📁 {name} ({info['progress']:.1f}%)")
+            
+            if errors:
+                messages.append("❌ **Ошибки:**")
+                for info in errors:
+                    name = info['name'][:40] + ('...' if len(info['name']) > 40 else '')
+                    messages.append(f"� {name}")
+            
+            # Отправляем сообщение частями, если оно слишком длинное
+            full_message = "\n".join(messages)
+            
+            if len(full_message) > 4000:  # Лимит Telegram ~4096 символов
+                # Разбиваем на части
+                parts = []
+                current_part = []
+                current_length = 0
+                
+                for line in messages:
+                    line_length = len(line) + 1  # +1 для \n
+                    if current_length + line_length > 3500:  # Оставляем запас
+                        parts.append("\n".join(current_part))
+                        current_part = [line]
+                        current_length = line_length
+                    else:
+                        current_part.append(line)
+                        current_length += line_length
+                
+                if current_part:
+                    parts.append("\n".join(current_part))
+                
+                # Отправляем части
+                for i, part in enumerate(parts):
+                    header = f"📊 **Статус торрентов** (часть {i+1}/{len(parts)})\n\n" if len(parts) > 1 else "📊 **Статус торрентов**\n\n"
+                    await update.message.reply_text(header + part, parse_mode=ParseMode.MARKDOWN)
+            else:
+                await update.message.reply_text(f"📊 **Статус торрентов**\n\n{full_message}", parse_mode=ParseMode.MARKDOWN)
+        
+        except Exception as e:
+            logger.error(f"Ошибка получения статуса: {e}")
+            await update.message.reply_text(f"❌ **Ошибка получения статуса**\n\n`{str(e)}`", parse_mode=ParseMode.MARKDOWN)
     
     async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда для получения статистики бота (только для авторизованных пользователей)"""
