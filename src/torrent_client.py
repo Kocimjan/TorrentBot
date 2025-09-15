@@ -116,17 +116,78 @@ class TorrentClient:
                 temp_file_path = temp_file.name
             
             try:
+                # Проверяем свободное место на диске
+                try:
+                    main_data = self.client.sync_maindata()
+                    if 'server_state' in main_data:
+                        state = main_data['server_state']
+                        free_space = state.get('free_space_on_disk', 0)
+                        if isinstance(free_space, (int, float)) and free_space < 100 * 1024 * 1024:  # Меньше 100 МБ
+                            logger.warning(f"Мало свободного места: {free_space / (1024*1024):.1f} МБ")
+                except Exception as e:
+                    logger.warning(f"Не удалось проверить свободное место: {e}")
+                
                 # Добавляем торрент
                 logger.info(f"Отправка торрента в qBittorrent...")
                 if not self.client:
                     raise Exception("Клиент qBittorrent не подключен")
-                    
-                result = self.client.torrents_add(
-                    torrent_files=temp_file_path,
-                    save_path=self.downloads_dir
-                )
+                
+                # Пытаемся добавить торрент с дополнительными параметрами
+                try:
+                    result = self.client.torrents_add(
+                        torrent_files=temp_file_path,
+                        save_path=self.downloads_dir,
+                        is_paused=False,  # Не ставим на паузу
+                        skip_checking=False,  # Проверяем файлы
+                        content_layout='Original'  # Сохраняем оригинальную структуру
+                    )
+                except Exception as add_error:
+                    logger.error(f"Ошибка при добавлении торрента: {add_error}")
+                    # Пробуем без дополнительных параметров
+                    result = self.client.torrents_add(
+                        torrent_files=temp_file_path,
+                        save_path=self.downloads_dir
+                    )
                 
                 logger.info(f"Результат добавления: {result}")
+                
+                # Анализируем результат
+                if result == "Ok.":
+                    logger.info("✅ Торрент успешно добавлен в qBittorrent")
+                elif result == "Fails.":
+                    logger.error("❌ qBittorrent отклонил торрент")
+                    # Пытаемся выяснить причину
+                    try:
+                        # Проверяем, может торрент уже существует
+                        import hashlib
+                        with open(temp_file_path, 'rb') as f:
+                            torrent_content = f.read()
+                        
+                        # Пытаемся получить хэш торрента для проверки дубликатов
+                        all_torrents = self.client.torrents_info()
+                        for existing_torrent in all_torrents:
+                            if existing_torrent.name.lower() in filename.lower() or filename.lower() in existing_torrent.name.lower():
+                                logger.warning(f"Возможно торрент уже существует: {existing_torrent.name} ({existing_torrent.hash})")
+                                return existing_torrent.hash
+                        
+                        # Проверяем размер файла
+                        file_size = os.path.getsize(temp_file_path)
+                        if file_size < 100:
+                            logger.error(f"Торрент-файл слишком мал: {file_size} байт")
+                        
+                        logger.error("Возможные причины ошибки 'Fails.':")
+                        logger.error("1. Торрент уже существует в qBittorrent")
+                        logger.error("2. Недостаточно места на диске")
+                        logger.error("3. Поврежденный торрент-файл")
+                        logger.error("4. Торрент содержит недопустимые символы в путях")
+                        logger.error("5. Превышен лимит количества торрентов")
+                        
+                    except Exception as diag_error:
+                        logger.error(f"Ошибка диагностики: {diag_error}")
+                    
+                    return None
+                else:
+                    logger.warning(f"Неожиданный результат от qBittorrent: {result}")
                 
                 # Получаем hash добавленного торрента
                 if result == "Ok.":
@@ -279,6 +340,16 @@ class TorrentClient:
             torrents = self.client.torrents_info(torrent_hashes=torrent_hash)
             if torrents:
                 torrent = torrents[0]
+                
+                # Получаем количество файлов отдельным запросом
+                files_count = 0
+                try:
+                    files = self.client.torrents_files(torrent_hash=torrent_hash)
+                    files_count = len(files) if files else 0
+                except Exception as files_error:
+                    logger.warning(f"Не удалось получить количество файлов: {files_error}")
+                    files_count = getattr(torrent, 'num_files', 0)
+                
                 return {
                     'name': torrent.name,
                     'state': torrent.state,
@@ -287,7 +358,14 @@ class TorrentClient:
                     'downloaded': torrent.downloaded,
                     'download_speed': torrent.dlspeed,
                     'eta': torrent.eta,
-                    'files_count': torrent.num_files
+                    'files_count': files_count,
+                    'hash': torrent.hash,
+                    'priority': getattr(torrent, 'priority', 0),
+                    'ratio': getattr(torrent, 'ratio', 0),
+                    'uploaded': getattr(torrent, 'uploaded', 0),
+                    'upspeed': getattr(torrent, 'upspeed', 0),
+                    'completed': getattr(torrent, 'completed', 0),
+                    'completion_on': getattr(torrent, 'completion_on', 0)
                 }
             
             return None
@@ -308,31 +386,70 @@ class TorrentClient:
                 info = self.get_torrent_info(torrent_hash)
                 
                 if info is None:
-                    logger.error("Торрент не найден")
+                    logger.error("Торрент не найден или ошибка получения информации")
                     return False
                 
                 state = info['state']
                 progress = info['progress']
                 
+                logger.debug(f"Торрент {torrent_hash}: состояние={state}, прогресс={progress:.1f}%")
+                
                 # Отправляем обновление прогресса
                 if progress_callback:
-                    progress_callback(info)
+                    try:
+                        progress_callback(info)
+                    except Exception as callback_error:
+                        logger.warning(f"Ошибка callback функции: {callback_error}")
                 
-                # Проверяем состояние
-                if state in ['uploading', 'stalledUP', 'queuedUP']:
-                    # Скачивание завершено
-                    logger.info(f"Торрент {torrent_hash} скачан успешно")
+                # Проверяем состояние завершения
+                completed_states = [
+                    'uploading',     # Скачано, раздается
+                    'stalledUP',     # Скачано, нет пиров для раздачи
+                    'queuedUP',      # В очереди на раздачу
+                    'pausedUP',      # Приостановлено после завершения
+                    'forcedUP'       # Принудительная раздача
+                ]
+                
+                if state in completed_states:
+                    logger.info(f"Торрент {torrent_hash} скачан успешно (состояние: {state})")
                     return True
-                elif state in ['error', 'missingFiles']:
-                    # Ошибка скачивания
-                    logger.error(f"Ошибка скачивания торрента {torrent_hash}: {state}")
+                
+                # Проверяем состояния ошибки
+                error_states = [
+                    'error',         # Ошибка
+                    'missingFiles',  # Отсутствуют файлы
+                    'unknown'        # Неизвестное состояние
+                ]
+                
+                if state in error_states:
+                    logger.error(f"Ошибка скачивания торрента {torrent_hash}: состояние {state}")
                     return False
                 
-                # Ждём 5 секунд перед следующей проверкой
+                # Состояния скачивания - продолжаем ждать
+                downloading_states = [
+                    'downloading',   # Скачивается
+                    'stalledDL',     # Скачивание приостановлено (нет пиров)
+                    'queuedDL',      # В очереди на скачивание
+                    'pausedDL',      # Приостановлено пользователем
+                    'checkingUP',    # Проверка после скачивания
+                    'checkingDL',    # Проверка при скачивании
+                    'queuedForChecking',  # В очереди на проверку
+                    'checkingResumeData', # Проверка данных при возобновлении
+                    'moving',        # Перемещение файлов
+                    'allocating'     # Выделение места на диске
+                ]
+                
+                if state in downloading_states:
+                    # Ждём и продолжаем
+                    time.sleep(5)
+                    continue
+                
+                # Неизвестное состояние - логируем и продолжаем
+                logger.warning(f"Неизвестное состояние торрента {torrent_hash}: {state}")
                 time.sleep(5)
                 
         except Exception as e:
-            logger.error(f"Ошибка ожидания завершения торрента: {e}")
+            logger.error(f"Ошибка ожидания завершения торрента: {e}", exc_info=True)
             return False
     
     def get_torrent_files(self, torrent_hash: str) -> List[str]:
