@@ -35,15 +35,28 @@ class FileUploadRecord:
 class FileIdStorage:
     """Хранилище file_id для обмена между ботом и userbot."""
     
-    def __init__(self, db_path: str = "logs/file_uploads.db"):
+    def __init__(self, db_path: Optional[str] = None):
         """Инициализация хранилища."""
-        self.db_path = db_path
+        if db_path is None:
+            # Используем абсолютный путь относительно проекта
+            project_root = Path(__file__).parent.parent.parent
+            db_path = str(project_root / "logs" / "file_uploads.db")
+        
+        self.db_path = str(db_path)
         
         # Создаём директорию если не существует
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         
         # Инициализируем базу данных
-        self._init_db()
+        try:
+            self._init_db()
+        except Exception as e:
+            # Если не удается создать в logs, используем временную директорию
+            import tempfile
+            temp_dir = tempfile.gettempdir()
+            self.db_path = os.path.join(temp_dir, "torrentbot_file_uploads.db")
+            print(f"Не удалось создать БД в logs/, используем: {self.db_path}")
+            self._init_db()
     
     def _init_db(self):
         """Инициализация базы данных."""

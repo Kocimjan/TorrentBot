@@ -422,43 +422,38 @@ class TorrentBot:
                 try:
                     file_size = self.file_manager.get_file_size(file_path)
                     
-                    # Проверяем размер файла
-                    if file_size > MAX_FILE_SIZE:
-                        # Файл слишком большой - предлагаем разбить
-                        safe_filename_big = self._escape_markdown(filename)
-                        await self.application.bot.send_message(
+                    # Отправляем файл через SmartFileSender (автоматический выбор метода)
+                    safe_filename = self._escape_markdown(filename)
+                    await self.application.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"� Отправляю файл {i}/{len(files)}: {safe_filename}",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    
+                    # Используем SmartFileSender для автоматического выбора метода отправки
+                    if self.smart_file_sender:
+                        success = await self.smart_file_sender.send_file(
                             chat_id=chat_id,
-                            text=f"📦 {safe_filename_big} ({file_size / (1024**2):.1f} МБ)\n\n⚠️ Файл превышает лимит Telegram (50 МБ)\n📄 Разбиваю на части...",
-                            parse_mode=ParseMode.MARKDOWN
+                            file_path=file_path,
+                            filename=filename,
+                            caption=f"Файл {i}/{len(files)}: {filename}"
                         )
                         
-                        # Разбиваем и отправляем по частям
-                        await self._split_and_send_file_auto(file_path, chat_id)
-                        
+                        if not success:
+                            logger.warning(f"SmartFileSender не смог отправить файл, используем разбивку: {filename}")
+                            # Fallback на разбивку
+                            await self._split_and_send_file_auto(file_path, chat_id)
                     else:
-                        # Отправляем файл через SmartFileSender
-                        safe_filename = self._escape_markdown(filename)
-                        await self.application.bot.send_message(
-                            chat_id=chat_id,
-                            text=f"📤 Отправляю файл {i}/{len(files)}: {safe_filename}",
-                            parse_mode=ParseMode.MARKDOWN
-                        )
-                        
-                        # Используем SmartFileSender для автоматического выбора метода отправки
-                        if self.smart_file_sender:
-                            success = await self.smart_file_sender.send_file(
+                        # Fallback если SmartFileSender не инициализирован
+                        if file_size > 50 * 1024 * 1024:  # 50 МБ - лимит Bot API
+                            safe_filename_big = self._escape_markdown(filename)
+                            await self.application.bot.send_message(
                                 chat_id=chat_id,
-                                file_path=file_path,
-                                filename=filename,
-                                caption=f"Файл {i}/{len(files)}: {filename}"
+                                text=f"📦 {safe_filename_big} ({file_size / (1024**2):.1f} МБ)\n\n⚠️ Файл превышает лимит Bot API (50 МБ)\n📄 Разбиваю на части...",
+                                parse_mode=ParseMode.MARKDOWN
                             )
-                            
-                            if not success:
-                                logger.warning(f"SmartFileSender не смог отправить файл, используем разбивку: {filename}")
-                                # Fallback на разбивку
-                                await self._split_and_send_file_auto(file_path, chat_id)
+                            await self._split_and_send_file_auto(file_path, chat_id)
                         else:
-                            # Fallback если SmartFileSender не инициализирован
                             with open(file_path, 'rb') as file:
                                 await self.application.bot.send_document(
                                     chat_id=chat_id,

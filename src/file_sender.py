@@ -45,15 +45,19 @@ class SmartFileSender:
         """Инициализация userbot менеджера."""
         try:
             if self.userbot_config.is_configured():
+                self.logger.info("Инициализация userbot для больших файлов...")
                 self.userbot_manager = await get_userbot_file_manager(self.userbot_config)
-                if self.userbot_manager.is_available():
+                
+                if self.userbot_manager and self.userbot_manager.is_available():
                     self.logger.info("Userbot успешно инициализирован для больших файлов")
                 else:
-                    self.logger.warning("Userbot настроен но недоступен")
+                    self.logger.warning("Userbot настроен но недоступен (может не хватать прав или база данных недоступна)")
+                    self.userbot_manager = None
             else:
-                self.logger.info("Userbot не настроен, используем только Bot API")
+                self.logger.info("Userbot не настроен, используем только Bot API (до 50 МБ) и разбивку файлов")
         except Exception as e:
             self.logger.error(f"Ошибка инициализации userbot: {e}")
+            self.logger.info("Будем использовать только Bot API (до 50 МБ) и разбивку файлов")
             self.userbot_manager = None
     
     async def send_file(
@@ -91,13 +95,16 @@ class SmartFileSender:
         await self._ensure_userbot_initialized()
         
         # Определяем метод отправки
-        if should_use_userbot(file_path, self.userbot_config) and self.userbot_manager:
+        if should_use_userbot(file_path, self.userbot_config) and self.userbot_manager and self.userbot_manager.is_available():
+            self.logger.info(f"Используем userbot для отправки большого файла: {filename}")
             return await self._send_via_userbot(chat_id, file_path, filename, caption, progress_callback)
         else:
             # Проверяем лимит Bot API (50 МБ - стандартный лимит Telegram Bot API)
             if file_size > 50 * 1024 * 1024:  # 50 МБ
+                self.logger.info(f"Разбиваем файл на части: {filename}")
                 return await self._send_via_split(chat_id, file_path, filename, caption)
             else:
+                self.logger.info(f"Отправляем файл через Bot API: {filename}")
                 return await self._send_via_bot_api(chat_id, file_path, filename, caption)
     
     async def _send_via_userbot(
